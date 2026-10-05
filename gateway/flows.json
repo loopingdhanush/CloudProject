@@ -1,0 +1,750 @@
+[
+  {
+    "id": "tab_gateway",
+    "type": "tab",
+    "label": "Library Edge Gateway",
+    "disabled": false,
+    "info": "MQTT -> validate/convert -> 10-reading window -> features -> NORMAL/WARNING/CRITICAL -> summary / alert + Ditto twin update"
+  },
+  {
+    "id": "c1",
+    "type": "comment",
+    "name": "1-2  Receive + validate + convert",
+    "info": "",
+    "x": 170,
+    "y": 40,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "c2",
+    "type": "comment",
+    "name": "3-5  Window of 10, features, status",
+    "info": "",
+    "x": 520,
+    "y": 40,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "c3",
+    "type": "comment",
+    "name": "6  Edge decision: summary or alert",
+    "info": "",
+    "x": 850,
+    "y": 40,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "c4",
+    "type": "comment",
+    "name": "7  Update digital twin (Ditto REST)",
+    "info": "",
+    "x": 860,
+    "y": 300,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "mqtt_in",
+    "type": "mqtt in",
+    "name": "library/+/telemetry",
+    "topic": "library/+/telemetry",
+    "qos": "0",
+    "datatype": "utf8",
+    "broker": "broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 150,
+    "y": 100,
+    "wires": [
+      [
+        "validate"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "validate",
+    "type": "function",
+    "name": "Validate & convert",
+    "func": "// STEP 1+2: validate the raw sensor message and convert it to the common JSON format\nconst stats = flow.get('stats') || {raw: 0, valid: 0, dropped: 0, windows: 0, summaries: 0, alerts: 0, twinUpdates: 0};\nstats.raw++;\nflow.set('stats', stats);\n\nfunction drop(why) {\n    stats.dropped++;\n    flow.set('stats', stats);\n    node.status({fill: 'red', shape: 'ring', text: 'dropped: ' + why});\n    return null;\n}\n\nlet d;\ntry { d = JSON.parse(msg.payload); } catch (e) { return drop('broken JSON'); }\nif (!d || typeof d !== 'object') return drop('not a JSON object');\nconst room = msg.topic.split('/')[1];          // library/<room>/telemetry\n\n// conversion: vendor B sends Fahrenheit -> Celsius\nlet temperature = d.temperature;\nif (d.temperature_f !== undefined) {\n    temperature = typeof d.temperature_f === 'number' ? (d.temperature_f - 32) * 5 / 9 : NaN;\n}\n\n// cleaning: missing, non-numeric or impossible values\nconst isNum = v => typeof v === 'number' && isFinite(v);\nif (!isNum(d.occupancy) || !isNum(temperature) || !isNum(d.humidity)) return drop('missing / non-numeric value');\nif (d.occupancy < 0 || d.occupancy > 500) return drop('impossible occupancy ' + d.occupancy);\nif (temperature < -10 || temperature > 50) return drop('impossible temperature ' + temperature.toFixed(1));\nif (d.humidity < 0 || d.humidity > 100) return drop('impossible humidity ' + d.humidity);\n\n// conversion: equipment codes 0/1/2 -> OFF/ON/FAULT\nconst CODES = {0: 'OFF', 1: 'ON', 2: 'FAULT'};\nconst devices = {};\nfor (const [k, v] of Object.entries(d.equipment || {})) {\n    const s = typeof v === 'number' ? CODES[v] : String(v).toUpperCase();\n    if (!['OFF', 'ON', 'FAULT'].includes(s)) return drop('unknown equipment state');\n    devices[k] = s;\n}\nconst faults = Object.keys(devices).filter(k => devices[k] === 'FAULT');\n\nstats.valid++;\nflow.set('stats', stats);\nmsg.payload = {\n    room: room,\n    occupancy: d.occupancy,\n    temperature: Math.round(temperature * 10) / 10,\n    humidity: d.humidity,\n    equipment: faults.length ? 'FAULT' : 'OK',\n    devices: devices,\n    faults: faults\n};\nnode.status({fill: 'green', shape: 'dot', text: 'ok ' + room});\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 370,
+    "y": 100,
+    "wires": [
+      [
+        "window"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "window",
+    "type": "function",
+    "name": "Window features & status",
+    "func": "// STEP 3-5: collect 10 valid readings per room, extract features, classify the room\nconst ROOMS = {\n    R01: {name: 'Reading Hall', capacity: 80},\n    R02: {name: 'Computer Lab', capacity: 40},\n    R03: {name: 'Discussion Room', capacity: 12}\n};\nconst WINDOW = 10;\nconst r = msg.payload;\nconst room = ROOMS[r.room];\nif (!room) return null;\n\nconst buffers = context.get('buffers') || {};\nconst buf = (buffers[r.room] || []).concat([r]);\nbuffers[r.room] = buf.length >= WINDOW ? [] : buf;\ncontext.set('buffers', buffers);\nnode.status({text: Object.keys(ROOMS).map(k => k + ' ' + (buffers[k] || []).length + '/' + WINDOW).join('  ')});\nif (buf.length < WINDOW) return null;\n\n// --- window statistics ---\nconst avg = a => a.reduce((s, x) => s + x, 0) / a.length;\nconst r1 = x => Math.round(x * 10) / 10;\nconst occ = buf.map(x => x.occupancy);\nconst avgOcc = r1(avg(occ));\nconst peakOcc = Math.max(...occ);\nconst pct = r1(avgOcc / room.capacity * 100);\nconst avgTemp = r1(avg(buf.map(x => x.temperature)));\nconst avgHum = r1(avg(buf.map(x => x.humidity)));\nconst last = buf[buf.length - 1];\nconst faults = last.faults;                     // equipment health = devices in FAULT now\n\n// --- abnormal count: readings in the window that break a threshold rule ---\nconst tempBad = t => t < 20 || t > 26;\nconst humBad = h => h < 40 || h > 60;\nconst abnormal = buf.filter(x => tempBad(x.temperature) || humBad(x.humidity) ||\n    x.occupancy >= 0.8 * room.capacity || x.faults.length > 0).length;\n\n// --- rule based status ---\nlet status = 'NORMAL';\nconst reasons = [];\nif (pct > 100) reasons.push('over capacity (' + pct + '%)');\nif (faults.length) reasons.push('equipment FAULT: ' + faults.join(', '));\nif (tempBad(avgTemp) && humBad(avgHum)) reasons.push('bad environment: ' + avgTemp + ' C and ' + avgHum + ' %');\nif (reasons.length) {\n    status = 'CRITICAL';\n} else {\n    if (tempBad(avgTemp)) reasons.push('temperature ' + avgTemp + ' C outside 20-26');\n    if (humBad(avgHum)) reasons.push('humidity ' + avgHum + ' % outside 40-60');\n    if (pct >= 80) reasons.push('occupancy ' + pct + '% of capacity');\n    if (reasons.length) status = 'WARNING';\n}\n\n// --- occupancy trend: rising over the last 4 windows and above 70 % -> LIMITED ---\nconst hist = context.get('history') || {};\nconst h = (hist[r.room] || []).concat([avgOcc]).slice(-4);\nhist[r.room] = h;\ncontext.set('history', hist);\nconst rising = h.length === 4 && h.every((v, i) => i === 0 || v > h[i - 1]);\nlet seats = 'AVAILABLE';\nif (pct >= 100) seats = 'FULL';\nelse if (rising && pct > 70) seats = 'LIMITED';\n\nconst stats = flow.get('stats');\nstats.windows++;\nflow.set('stats', stats);\n\nmsg.payload = {\n    room: r.room,\n    name: room.name,\n    status: status,\n    reasons: reasons,\n    occupancy: {average: avgOcc, peak: peakOcc, percent: pct, capacity: room.capacity, trend: rising ? 'RISING' : 'STABLE'},\n    environment: {temperature: avgTemp, humidity: avgHum},\n    equipment: Object.assign({}, last.devices, {state: last.equipment, faults: faults.length}),\n    abnormalCount: abnormal,\n    seatAvailability: seats,\n    windowSize: WINDOW,\n    time: new Date().toISOString()\n};\nnode.status({fill: status === 'NORMAL' ? 'green' : status === 'WARNING' ? 'yellow' : 'red',\n             shape: 'dot', text: r.room + ': ' + status});\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 600,
+    "y": 100,
+    "wires": [
+      [
+        "decide",
+        "to_ditto"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "decide",
+    "type": "switch",
+    "name": "CRITICAL?",
+    "property": "payload.status",
+    "propertyType": "msg",
+    "rules": [
+      {
+        "t": "eq",
+        "v": "CRITICAL",
+        "vt": "str"
+      },
+      {
+        "t": "else"
+      }
+    ],
+    "checkall": "false",
+    "repair": false,
+    "outputs": 2,
+    "x": 800,
+    "y": 100,
+    "wires": [
+      [
+        "alert"
+      ],
+      [
+        "summary"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "alert",
+    "type": "function",
+    "name": "Alert path",
+    "func": "// Alert path: CRITICAL -> immediate alert (MQTT + dashboard popup + alert list)\nconst s = flow.get('stats'); s.alerts++; flow.set('stats', s);\nconst p = msg.payload;\nconst version = env.get('GATEWAY_VERSION') || 'v1';\nconst alert = {type: 'ALERT', room: p.room, name: p.name, reasons: p.reasons,\n               time: p.time, gatewayVersion: version};\n\n// Version 2 feature: tell the staff what to do\nif (version !== 'v1') {\n    const r = p.reasons.join(' ');\n    alert.action = r.includes('over capacity') ? 'Send students to another room'\n                 : r.includes('FAULT') ? 'Call technician for: ' + r.split('FAULT: ')[1]\n                 : 'Check the air conditioning / ventilation';\n}\n\nconst list = flow.get('alertList') || [];\nlist.unshift(Object.assign({clock: new Date().toLocaleTimeString()}, alert));\nflow.set('alertList', list.slice(0, 8));\n\nconst text = p.room + ' ' + p.name + ': ' + p.reasons.join('; ') + (alert.action ? ' -> ' + alert.action : '');\nreturn [\n    {topic: 'library/alerts', payload: alert},\n    {topic: 'CRITICAL ALERT', payload: text},\n    {payload: flow.get('alertList')}\n];",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 960,
+    "y": 140,
+    "wires": [
+      [
+        "mqtt_alert",
+        "dbg_alert"
+      ],
+      [
+        "toast"
+      ],
+      [
+        "alerts_ui"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "summary",
+    "type": "function",
+    "name": "Summary path",
+    "func": "// Summary path: NORMAL / WARNING -> one small summary message per window\nconst s = flow.get('stats'); s.summaries++; flow.set('stats', s);\nconst p = msg.payload;\nmsg.topic = 'library/' + p.room + '/summary';\nmsg.payload = {room: p.room, status: p.status, reasons: p.reasons, occupancy: p.occupancy.average,\n               percent: p.occupancy.percent, temperature: p.environment.temperature,\n               humidity: p.environment.humidity, seats: p.seatAvailability, time: p.time};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 970,
+    "y": 80,
+    "wires": [
+      [
+        "mqtt_summary",
+        "dbg_summary"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "mqtt_summary",
+    "type": "mqtt out",
+    "name": "library/<room>/summary",
+    "topic": "",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker",
+    "x": 1220,
+    "y": 60,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "dbg_summary",
+    "type": "debug",
+    "name": "summary",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1180,
+    "y": 100,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "mqtt_alert",
+    "type": "mqtt out",
+    "name": "library/alerts",
+    "topic": "",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker",
+    "x": 1190,
+    "y": 160,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "dbg_alert",
+    "type": "debug",
+    "name": "ALERT",
+    "active": true,
+    "tosidebar": true,
+    "console": true,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1170,
+    "y": 200,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "toast",
+    "type": "ui_toast",
+    "name": "Alert popup",
+    "position": "top right",
+    "displayTime": "6",
+    "highlight": "#c62828",
+    "sendall": true,
+    "outputs": 0,
+    "ok": "OK",
+    "cancel": "",
+    "raw": false,
+    "className": "",
+    "topic": "",
+    "x": 1180,
+    "y": 240,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "alerts_ui",
+    "type": "ui_template",
+    "group": "grp_alerts",
+    "name": "Alert list",
+    "order": 1,
+    "width": 0,
+    "height": 0,
+    "format": "<style>.lib-al{border-left:5px solid #c62828;background:#ffebee;color:#222;padding:4px 8px;margin:4px 0;border-radius:4px;font-size:13px}</style>\n<div ng-if=\"!msg.payload.length\">No alerts yet</div>\n<div class=\"lib-al\" ng-repeat=\"a in msg.payload\">\n <b>{{a.clock}} {{a.room}} {{a.name}}</b>: {{a.reasons.join('; ')}}\n <div ng-if=\"a.action\"><b>Action:</b> {{a.action}}</div>\n</div>",
+    "storeOutMessages": true,
+    "fwdInMessages": false,
+    "resendOnRefresh": true,
+    "templateScope": "local",
+    "className": "",
+    "x": 1170,
+    "y": 280,
+    "wires": [
+      []
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "to_ditto",
+    "type": "function",
+    "name": "Build merge-patch",
+    "func": "// STEP 7: update the room twin in Ditto (REST, JSON merge-patch)\nconst p = msg.payload;\nmsg.method = 'PATCH';\nmsg.url = env.get('DITTO_URL') + '/api/2/things/library:' + p.room;\nmsg.headers = {'Content-Type': 'application/merge-patch+json', 'Authorization': 'Basic ZGl0dG86ZGl0dG8='};\nmsg.payload = {features: {\n    occupancy:   {properties: p.occupancy},\n    environment: {properties: p.environment},\n    equipment:   {properties: p.equipment},\n    status:      {properties: {value: p.status, reasons: p.reasons, abnormalCount: p.abnormalCount,\n                               windowSize: p.windowSize, updated: p.time}},\n    SeatAvailability: {properties: {value: p.seatAvailability}}\n}};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 630,
+    "y": 360,
+    "wires": [
+      [
+        "http_patch"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "http_patch",
+    "type": "http request",
+    "name": "PATCH twin",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 830,
+    "y": 360,
+    "wires": [
+      [
+        "ditto_result"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "ditto_result",
+    "type": "function",
+    "name": "Check result",
+    "func": "if (msg.statusCode === 204 || msg.statusCode === 200) {\n    const s = flow.get('stats'); s.twinUpdates++; flow.set('stats', s);\n    node.status({fill: 'green', shape: 'dot', text: 'twin updated (' + msg.url.split(':').pop() + ')'});\n} else {\n    node.status({fill: 'red', shape: 'ring', text: 'Ditto error ' + msg.statusCode});\n    node.warn('Ditto update failed: ' + msg.statusCode + ' ' + JSON.stringify(msg.payload));\n}\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1010,
+    "y": 360,
+    "wires": [
+      []
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "c5",
+    "type": "comment",
+    "name": "10  Raw vs forwarded (every 5 s)",
+    "info": "",
+    "x": 170,
+    "y": 440,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "tick_stats",
+    "type": "inject",
+    "name": "every 5 s",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "5",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "3",
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 140,
+    "y": 480,
+    "wires": [
+      [
+        "stats"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "stats",
+    "type": "function",
+    "name": "Data reduction stats",
+    "func": "// STEP 10: raw vs forwarded messages (edge data reduction)\nconst s = flow.get('stats') || {raw: 0, valid: 0, dropped: 0, windows: 0, summaries: 0, alerts: 0, twinUpdates: 0};\nconst forwarded = s.summaries + s.alerts;\nconst reduction = s.raw ? Math.round(1000 * (1 - forwarded / s.raw)) / 10 : 0;\nconst data = Object.assign({}, s, {forwarded: forwarded, reductionPercent: reduction,\n                                   version: env.get('GATEWAY_VERSION') || 'v1',\n                                   updated: new Date().toISOString()});\nconst toDitto = {\n    method: 'PATCH',\n    url: env.get('DITTO_URL') + '/api/2/things/library:gateway',\n    headers: {'Content-Type': 'application/merge-patch+json', 'Authorization': 'Basic ZGl0dG86ZGl0dG8='},\n    payload: {features: {stats: {properties: data}}}\n};\nreturn [toDitto, {payload: data}];",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 360,
+    "y": 480,
+    "wires": [
+      [
+        "http_stats"
+      ],
+      [
+        "stats_ui"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "http_stats",
+    "type": "http request",
+    "name": "PATCH library:gateway",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 610,
+    "y": 460,
+    "wires": [
+      []
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "stats_ui",
+    "type": "ui_template",
+    "group": "grp_stats",
+    "name": "Edge stats",
+    "order": 1,
+    "width": 0,
+    "height": 0,
+    "format": "<style>.lib-st td{padding:2px 10px 2px 0} .lib-big{font-size:28px;font-weight:bold;color:#2e7d32}</style>\n<div>Gateway version: <b>{{msg.payload.version}}</b></div>\n<div class=\"lib-big\">{{msg.payload.reductionPercent}} % less data</div>\n<table class=\"lib-st\">\n <tr><td>Raw messages received</td><td><b>{{msg.payload.raw}}</b></td></tr>\n <tr><td>Valid / dropped</td><td>{{msg.payload.valid}} / {{msg.payload.dropped}}</td></tr>\n <tr><td>Windows processed</td><td>{{msg.payload.windows}}</td></tr>\n <tr><td>Forwarded (summaries + alerts)</td><td><b>{{msg.payload.forwarded}}</b> ({{msg.payload.summaries}} + {{msg.payload.alerts}})</td></tr>\n <tr><td>Twin updates sent to Ditto</td><td>{{msg.payload.twinUpdates}}</td></tr>\n</table>",
+    "storeOutMessages": true,
+    "fwdInMessages": false,
+    "resendOnRefresh": true,
+    "templateScope": "local",
+    "className": "",
+    "x": 580,
+    "y": 510,
+    "wires": [
+      []
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "c6",
+    "type": "comment",
+    "name": "8  Dashboard reads the twins from Ditto (every 3 s)",
+    "info": "",
+    "x": 230,
+    "y": 580,
+    "wires": [],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "tick_read",
+    "type": "inject",
+    "name": "every 3 s",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "3",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "3",
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 140,
+    "y": 620,
+    "wires": [
+      [
+        "read_twins"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "read_twins",
+    "type": "function",
+    "name": "GET twins",
+    "func": "// STEP 8: dashboard reads the room twins back from Ditto\nmsg.method = 'GET';\nmsg.url = env.get('DITTO_URL') + '/api/2/things?ids=library:R01,library:R02,library:R03';\nmsg.headers = {'Authorization': 'Basic ZGl0dG86ZGl0dG8='};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 320,
+    "y": 620,
+    "wires": [
+      [
+        "http_get"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "http_get",
+    "type": "http request",
+    "name": "GET Ditto",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 490,
+    "y": 620,
+    "wires": [
+      [
+        "format"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "format",
+    "type": "function",
+    "name": "Format for UI",
+    "func": "if (msg.statusCode !== 200 || !Array.isArray(msg.payload)) {\n    msg.payload = {error: 'Ditto not reachable (' + msg.statusCode + ')', rooms: []};\n    return msg;\n}\nconst P = (t, f) => (t.features && t.features[f] && t.features[f].properties) || {};\nconst rooms = msg.payload.map(t => {\n    const o = P(t, 'occupancy'), e = P(t, 'environment'), q = P(t, 'equipment'), s = P(t, 'status');\n    return {\n        id: t.attributes.roomId, name: t.attributes.name, floor: t.attributes.floor,\n        capacity: t.attributes.capacity, serial: t.attributes.sensorSerial,\n        status: s.value || 'WAITING', reasons: (s.reasons || []).join('; '),\n        occ: o.average, peak: o.peak, pct: o.percent, bar: Math.min(o.percent || 0, 100), trend: o.trend,\n        temp: e.temperature, hum: e.humidity, abnormal: s.abnormalCount,\n        devices: ['lights', 'ac', 'computers', 'printer'].map(k => ({k: k, v: q[k] || '-'})),\n        seats: P(t, 'SeatAvailability').value || '-',\n        updated: s.updated ? new Date(s.updated).toLocaleTimeString() : '-'\n    };\n}).sort((a, b) => a.id < b.id ? -1 : 1);\nmsg.payload = {rooms: rooms, version: env.get('GATEWAY_VERSION') || 'v1'};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 660,
+    "y": 620,
+    "wires": [
+      [
+        "rooms_ui"
+      ]
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "rooms_ui",
+    "type": "ui_template",
+    "group": "grp_rooms",
+    "name": "Rooms",
+    "order": 1,
+    "width": 0,
+    "height": 0,
+    "format": "<style>\n .lib-rooms {display:flex; flex-wrap:wrap; gap:14px; width:100%}\n .lib-card {flex:1 1 300px; border-radius:10px; padding:12px 14px; color:#222; background:#f4f4f4; border-left:10px solid #9e9e9e}\n .lib-card.NORMAL   {background:#e8f5e9; border-color:#2e7d32}\n .lib-card.WARNING  {background:#fff3e0; border-color:#ef6c00}\n .lib-card.CRITICAL {background:#ffebee; border-color:#c62828}\n .lib-card h3 {margin:0 0 6px 0; font-size:18px}\n .lib-badge {float:right; color:#fff; font-weight:bold; padding:3px 10px; border-radius:6px; background:#9e9e9e}\n .lib-badge.NORMAL {background:#2e7d32} .lib-badge.WARNING {background:#ef6c00} .lib-badge.CRITICAL {background:#c62828}\n .lib-bar {height:10px; background:#ddd; border-radius:5px; margin:4px 0 8px}\n .lib-bar div {height:10px; border-radius:5px; background:#1976d2}\n .lib-row {margin:3px 0} .lib-small {font-size:12px; color:#555}\n .lib-dev {display:inline-block; margin:2px 4px 2px 0; padding:1px 6px; border-radius:4px; background:#e0e0e0; font-size:12px}\n .lib-dev.FAULT {background:#c62828; color:#fff} .lib-dev.OFF {background:#bdbdbd}\n .lib-err {color:#c62828; font-weight:bold}\n</style>\n<div class=\"lib-err\" ng-if=\"msg.payload.error\">{{msg.payload.error}}</div>\n<div class=\"lib-rooms\">\n <div class=\"lib-card {{r.status}}\" ng-repeat=\"r in msg.payload.rooms\">\n  <span class=\"lib-badge {{r.status}}\">{{r.status}}</span>\n  <h3>{{r.id}} - {{r.name}}</h3>\n  <div class=\"lib-small\">Floor {{r.floor}} | capacity {{r.capacity}} | sensor {{r.serial}}</div>\n  <div class=\"lib-row\">Occupancy: <b>{{r.occ}}</b> / {{r.capacity}} ({{r.pct}} %) - peak {{r.peak}} - trend {{r.trend}}</div>\n  <div class=\"lib-bar\"><div ng-style=\"{width: r.bar + '%'}\"></div></div>\n  <div class=\"lib-row\">Temperature: <b>{{r.temp}} &deg;C</b> &nbsp; Humidity: <b>{{r.hum}} %</b></div>\n  <div class=\"lib-row\">Seats: <b>{{r.seats}}</b> &nbsp; Abnormal readings: {{r.abnormal}}/10</div>\n  <div class=\"lib-row\"><span class=\"lib-dev {{d.v}}\" ng-repeat=\"d in r.devices\">{{d.k}}: {{d.v}}</span></div>\n  <div class=\"lib-small\" ng-if=\"r.reasons\">Why: {{r.reasons}}</div>\n  <div class=\"lib-small\">Twin updated {{r.updated}}</div>\n </div>\n</div>",
+    "storeOutMessages": true,
+    "fwdInMessages": false,
+    "resendOnRefresh": true,
+    "templateScope": "local",
+    "className": "",
+    "x": 840,
+    "y": 620,
+    "wires": [
+      []
+    ],
+    "z": "tab_gateway"
+  },
+  {
+    "id": "broker",
+    "type": "mqtt-broker",
+    "name": "Mosquitto",
+    "broker": "${MQTT_HOST}",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  },
+  {
+    "id": "dash_base",
+    "type": "ui_base",
+    "theme": {
+      "name": "theme-light",
+      "lightTheme": {
+        "default": "#0094CE",
+        "baseColor": "#0d47a1",
+        "baseFont": "-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen-Sans,Ubuntu,Cantarell,Helvetica Neue,sans-serif",
+        "edited": true,
+        "reset": false
+      },
+      "darkTheme": {
+        "default": "#097479",
+        "baseColor": "#097479",
+        "baseFont": "-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen-Sans,Ubuntu,Cantarell,Helvetica Neue,sans-serif",
+        "edited": false
+      },
+      "customTheme": {
+        "name": "Untitled Theme 1",
+        "default": "#4B7930",
+        "baseColor": "#4B7930",
+        "baseFont": "-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen-Sans,Ubuntu,Cantarell,Helvetica Neue,sans-serif"
+      },
+      "themeState": {
+        "base-color": {
+          "default": "#0094CE",
+          "value": "#0d47a1",
+          "edited": true
+        },
+        "page-titlebar-backgroundColor": {
+          "value": "#0d47a1",
+          "edited": false
+        },
+        "page-backgroundColor": {
+          "value": "#fafafa",
+          "edited": false
+        },
+        "page-sidebar-backgroundColor": {
+          "value": "#ffffff",
+          "edited": false
+        },
+        "group-textColor": {
+          "value": "#1565c0",
+          "edited": false
+        },
+        "group-borderColor": {
+          "value": "#ffffff",
+          "edited": false
+        },
+        "group-backgroundColor": {
+          "value": "#ffffff",
+          "edited": false
+        },
+        "widget-textColor": {
+          "value": "#111111",
+          "edited": false
+        },
+        "widget-backgroundColor": {
+          "value": "#0d47a1",
+          "edited": false
+        },
+        "widget-borderColor": {
+          "value": "#ffffff",
+          "edited": false
+        },
+        "base-font": {
+          "value": "-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Oxygen-Sans,Ubuntu,Cantarell,Helvetica Neue,sans-serif"
+        }
+      },
+      "angularTheme": {
+        "primary": "indigo",
+        "accents": "blue",
+        "warn": "red",
+        "background": "grey",
+        "palette": "light"
+      }
+    },
+    "site": {
+      "name": "Smart Library Monitor",
+      "hideToolbar": "false",
+      "allowSwipe": "false",
+      "lockMenu": "false",
+      "allowTempTheme": "true",
+      "dateFormat": "DD/MM/YYYY",
+      "sizes": {
+        "sx": 48,
+        "sy": 48,
+        "gx": 6,
+        "gy": 6,
+        "cx": 6,
+        "cy": 6,
+        "px": 0,
+        "py": 0
+      }
+    }
+  },
+  {
+    "id": "dash_tab",
+    "type": "ui_tab",
+    "name": "Library",
+    "icon": "dashboard",
+    "order": 1,
+    "disabled": false,
+    "hidden": false
+  },
+  {
+    "id": "grp_rooms",
+    "type": "ui_group",
+    "name": "Rooms - live from the Ditto twins",
+    "tab": "dash_tab",
+    "order": 1,
+    "disp": true,
+    "width": "20",
+    "collapse": false,
+    "className": ""
+  },
+  {
+    "id": "grp_stats",
+    "type": "ui_group",
+    "name": "Edge gateway",
+    "tab": "dash_tab",
+    "order": 2,
+    "disp": true,
+    "width": "8",
+    "collapse": false,
+    "className": ""
+  },
+  {
+    "id": "grp_alerts",
+    "type": "ui_group",
+    "name": "Latest CRITICAL alerts",
+    "tab": "dash_tab",
+    "order": 3,
+    "disp": true,
+    "width": "12",
+    "collapse": false,
+    "className": ""
+  }
+]

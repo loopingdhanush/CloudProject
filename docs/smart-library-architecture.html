@@ -1,0 +1,217 @@
+<title>Smart Library Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/* Layout: one reading column, wide tables/diagrams scroll inside their own boxes */
+:root {
+  --bg: #f6f7f5;
+  --surface: #ffffff;
+  --fg: #1d2523;
+  --muted: #5a6662;
+  --line: #d9dfdc;
+  --accent: #1f6b5c;        /* library green */
+  --accent-soft: #e3efeb;
+  --ok: #2e7d32; --warn: #c25e00; --crit: #c62828;
+  --chip-ditto: #e6ecf7; --chip-edge: #e5f1ec; --chip-sim: #fbf0dc;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #131917; --surface: #1b2220; --fg: #e4ebe8; --muted: #9aa8a3; --line: #2e3835;
+  --accent: #6cc3ad; --accent-soft: #1f302b;
+  --ok: #66bb6a; --warn: #ffa64d; --crit: #ef6b6b;
+  --chip-ditto: #232c3b; --chip-edge: #1f2f29; --chip-sim: #33291a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #131917; --surface: #1b2220; --fg: #e4ebe8; --muted: #9aa8a3; --line: #2e3835;
+  --accent: #6cc3ad; --accent-soft: #1f302b;
+  --ok: #66bb6a; --warn: #ffa64d; --crit: #ef6b6b;
+  --chip-ditto: #232c3b; --chip-edge: #1f2f29; --chip-sim: #33291a; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--font-body); }
+.wrap { max-width: 1040px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 64px; display: grid; gap: 44px; }
+h1, h2 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: clamp(28px, 4.5vw, 40px); }
+h2 { font-size: 24px; }
+h3 { font-size: 16px; margin: 0; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font: 500 12px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+header { display: grid; gap: 12px; }
+.lede { color: var(--muted); font-size: 17px; }
+section { display: grid; gap: 16px; min-width: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 13px; }
+code { background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+
+.table-box { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 760px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+td.name { font-family: var(--font-mono); font-size: 13px; font-weight: 500; white-space: nowrap; }
+td.img { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.group-row td { background: var(--accent-soft); font-weight: 600; font-size: 13px; padding: 6px 12px; }
+.port { font-family: var(--font-mono); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.diagram { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 16px; }
+.diagram pre.mermaid { margin: 0; background: transparent; display: flex; justify-content: center; }
+
+ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 14px; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 12px; }
+ol.steps li::before { content: counter(s); font: 600 14px var(--font-mono); color: var(--accent); border: 1.5px solid var(--accent);
+  border-radius: 50%; width: 28px; height: 28px; display: grid; place-items: center; }
+ol.steps li > div { min-width: 0; display: grid; gap: 2px; }
+
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.rule { border: 1px solid var(--line); border-top: 4px solid; border-radius: 8px; padding: 12px 14px; background: var(--surface); display: grid; gap: 4px; }
+.rule.n { border-top-color: var(--ok); } .rule.w { border-top-color: var(--warn); } .rule.c { border-top-color: var(--crit); }
+.rule h3 { font-family: var(--font-mono); letter-spacing: .04em; }
+.rule.n h3 { color: var(--ok); } .rule.w h3 { color: var(--warn); } .rule.c h3 { color: var(--crit); }
+.rule p { color: var(--muted); font-size: 14px; }
+.note { color: var(--muted); font-size: 14px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Q1 Docker · Q2 MQTT + Node-RED · Q5 Eclipse Ditto</div>
+    <h1>Smart Library Monitoring</h1>
+    <p class="lede">Three library rooms send simulated sensor data. An edge gateway on the laptop cleans it, decides each room's state and forwards only the result. The latest state of every room lives in a digital twin, and a dashboard shows the whole library. All of it runs as 10 Docker containers in the Compose project <code>smart-library</code>.</p>
+  </header>
+
+  <section>
+    <h2>The containers</h2>
+    <p class="note">Container names follow one pattern: <code>library-&lt;part&gt;</code>. The six <code>library-ditto-*</code> containers together make up Eclipse Ditto.</p>
+    <div class="table-box">
+      <table>
+        <thead><tr><th>Container</th><th>Image</th><th>Port</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr class="group-row"><td colspan="4">Sensors (simulated)</td></tr>
+          <tr><td class="name">library-sensors</td><td class="img">loopingdhanush/library-sensors:1.0</td><td class="port">–</td>
+            <td>Python simulator. Every second it publishes one reading per room (occupancy, temperature, humidity, equipment) to <code>library/&lt;room&gt;/telemetry</code>. About 8% of readings are deliberately broken. R02 behaves like a second vendor: Fahrenheit and equipment codes 0/1/2.</td></tr>
+
+          <tr class="group-row"><td colspan="4">Edge: MQTT and gateway</td></tr>
+          <tr><td class="name">library-mqtt-broker</td><td class="img">eclipse-mosquitto:2.0.22</td><td class="port">1883</td>
+            <td>Mosquitto MQTT broker. Receives sensor readings and passes them to whoever subscribes. Also carries the gateway's summaries and alerts.</td></tr>
+          <tr><td class="name">library-edge-gateway</td><td class="img">loopingdhanush/library-gateway:v1 / v2</td><td class="port">1880</td>
+            <td>Node-RED. Subscribes to <code>library/+/telemetry</code>, validates and converts each reading, builds 10-reading windows, extracts features, classifies NORMAL / WARNING / CRITICAL, sends summaries or alerts, and updates the room twin in Ditto. Also serves the dashboard at <code>/ui</code>.</td></tr>
+
+          <tr class="group-row"><td colspan="4">Digital twin: Eclipse Ditto</td></tr>
+          <tr><td class="name">library-ditto-nginx</td><td class="img">loopingdhanush/library-ditto-nginx:1.0</td><td class="port">8080</td>
+            <td>Front door of Ditto. Asks for a username and password (basic auth, <code>ditto / ditto</code>) and forwards allowed requests to the Ditto gateway.</td></tr>
+          <tr><td class="name">library-ditto-gateway</td><td class="img">eclipse/ditto-gateway:3.9.7</td><td class="port">internal</td>
+            <td>Ditto's REST API (<code>/api/2/things</code>, search). Receives GET, PUT and PATCH requests and routes them to the right Ditto service.</td></tr>
+          <tr><td class="name">library-ditto-things</td><td class="img">eclipse/ditto-things:3.9.7</td><td class="port">internal</td>
+            <td>Stores and updates the Things: one twin per room with attributes (name, floor, capacity, sensor serial) and features (occupancy, environment, equipment, status, SeatAvailability).</td></tr>
+          <tr><td class="name">library-ditto-policies</td><td class="img">eclipse/ditto-policies:3.9.7</td><td class="port">internal</td>
+            <td>Access control. Every Thing has a policy that says who may read or write it. Here the logged-in user <code>nginx:ditto</code> has full access.</td></tr>
+          <tr><td class="name">library-ditto-search</td><td class="img">eclipse/ditto-things-search:3.9.7</td><td class="port">internal</td>
+            <td>Search index. Answers queries such as "all rooms whose status is not NORMAL".</td></tr>
+          <tr><td class="name">library-ditto-mongodb</td><td class="img">mongo:7.0</td><td class="port">internal</td>
+            <td>Database where Ditto keeps twins, policies and the search index. Data is kept in the volume <code>smart-library_mongo-data</code>.</td></tr>
+
+          <tr class="group-row"><td colspan="4">Setup job</td></tr>
+          <tr><td class="name">library-twin-setup</td><td class="img">loopingdhanush/library-sensors:1.0</td><td class="port">–</td>
+            <td>Runs once at start-up and then exits with code 0. Waits for Ditto, then creates the twins <code>library:R01</code>, <code>R02</code>, <code>R03</code> and <code>library:gateway</code>. Mosquitto, Node-RED and the sensors start only after it succeeds.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Flowchart 1: how data moves between containers</h2>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  S["library-sensors<br/>Python simulator<br/>R01 · R02 · R03"]
+  B["library-mqtt-broker<br/>Mosquitto :1883"]
+  G["library-edge-gateway<br/>Node-RED :1880"]
+  U["Library staff<br/>browser :1880/ui"]
+  TS["library-twin-setup<br/>runs once"]
+  subgraph DITTO["Eclipse Ditto - digital twin"]
+    N["library-ditto-nginx<br/>basic auth :8080"]
+    DG["library-ditto-gateway<br/>REST API"]
+    T["library-ditto-things"]
+    P["library-ditto-policies"]
+    SE["library-ditto-search"]
+    M[("library-ditto-mongodb")]
+  end
+  S -- "1 MQTT publish<br/>library/room/telemetry" --> B
+  B -- "2 subscribe<br/>library/+/telemetry" --> G
+  G -- "3 summary + alerts<br/>(MQTT)" --> B
+  G -- "4 PATCH twin<br/>(REST, merge-patch)" --> N
+  TS -- "0 PUT Things" --> N
+  N --> DG
+  DG --> T
+  DG --> P
+  DG --> SE
+  T --> M
+  P --> M
+  SE --> M
+  G -- "5 GET twins every 3 s" --> N
+  U -- "6 view dashboard" --> G
+</pre>
+    </div>
+    <ol class="steps">
+      <li><div><h3>Twins are created first</h3><p>When Docker Compose starts, Ditto comes up first. <code>library-twin-setup</code> then creates one Thing per room with its fixed attributes, plus one Thing for gateway statistics.</p></div></li>
+      <li><div><h3>Sensors publish</h3><p><code>library-sensors</code> publishes a reading for each room every second to <code>library/R01/telemetry</code>, <code>library/R02/telemetry</code> and <code>library/R03/telemetry</code>.</p></div></li>
+      <li><div><h3>The broker delivers</h3><p><code>library-mqtt-broker</code> passes every reading to the gateway, which subscribes to the wildcard topic <code>library/+/telemetry</code>.</p></div></li>
+      <li><div><h3>The gateway decides at the edge</h3><p><code>library-edge-gateway</code> turns 10 readings into one result and publishes only that: a summary to <code>library/&lt;room&gt;/summary</code>, or an alert to <code>library/alerts</code>. That is about 91% fewer messages.</p></div></li>
+      <li><div><h3>The twin is updated</h3><p>The same result is sent as a REST <code>PATCH</code> to <code>/api/2/things/library:&lt;room&gt;</code>. nginx checks the login, the Ditto gateway routes the request, Things updates the twin and MongoDB stores it.</p></div></li>
+      <li><div><h3>The dashboard reads the twins</h3><p>Every 3 seconds the gateway asks Ditto for all three twins and draws the colour-coded room cards. Staff open <code>http://localhost:1880/ui</code>.</p></div></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Flowchart 2: what the edge gateway does with each reading</h2>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  A(["MQTT reading arrives"]) --> B{"Valid JSON?"}
+  B -- no --> X["Drop it<br/>dropped + 1"]
+  B -- yes --> C{"All values present,<br/>numeric and possible?"}
+  C -- no --> X
+  C -- yes --> D["Convert to common format<br/>°F → °C · 0/1/2 → OFF/ON/FAULT"]
+  D --> E["Add to the room's window"]
+  E --> F{"10 readings<br/>collected?"}
+  F -- no --> Z(["Wait for next reading"])
+  F -- yes --> G["Extract features<br/>avg + peak occupancy, % of capacity,<br/>avg temp + humidity, abnormal count,<br/>faults, occupancy trend"]
+  G --> H{"Over capacity, any FAULT,<br/>or temp AND humidity bad?"}
+  H -- yes --> CR["CRITICAL"]
+  H -- no --> I{"Temp or humidity out,<br/>or occupancy 80-100 %?"}
+  I -- yes --> WA["WARNING"]
+  I -- no --> NO["NORMAL"]
+  CR --> AL["Alert path<br/>library/alerts + dashboard popup"]
+  WA --> SU["Summary path<br/>library/room/summary"]
+  NO --> SU
+  AL --> TW["PATCH room twin in Ditto"]
+  SU --> TW
+  classDef crit fill:#c62828,color:#ffffff,stroke:#8e1c1c
+  classDef warn fill:#ef6c00,color:#ffffff,stroke:#a84c00
+  classDef ok fill:#2e7d32,color:#ffffff,stroke:#1e5a22
+  class CR crit
+  class WA warn
+  class NO ok
+</pre>
+    </div>
+    <ol class="steps">
+      <li><div><h3>Clean</h3><p>Broken JSON, missing or text values, and impossible values (occupancy −5, 70 °C, humidity 140%) are dropped and counted.</p></div></li>
+      <li><div><h3>Convert</h3><p>R02's Fahrenheit becomes Celsius and its equipment codes 0/1/2 become OFF/ON/FAULT, so all rooms use the same format: <code>{"room":"R01","occupancy":42,"temperature":24.1,"humidity":52,"equipment":"OK"}</code>.</p></div></li>
+      <li><div><h3>Window and features</h3><p>Each room collects 10 valid readings. The gateway then calculates average and peak occupancy, occupancy as a % of capacity, average temperature and humidity, how many readings broke a rule, and how many devices are in FAULT.</p></div></li>
+      <li><div><h3>Trend</h3><p>If average occupancy has risen in each of the last 4 windows and is above 70% of capacity, SeatAvailability becomes <code>LIMITED</code>, so staff can open another room early. At 100% or more it becomes <code>FULL</code>.</p></div></li>
+      <li><div><h3>Classify and decide</h3><p>The rules below set the status. CRITICAL goes out immediately as an alert. NORMAL and WARNING go out as one small summary. Either way, the room twin is updated.</p></div></li>
+    </ol>
+    <div class="rules">
+      <div class="rule n"><h3>NORMAL</h3><p>20–26 °C, 40–60% humidity, occupancy below 80% of capacity, all equipment working.</p></div>
+      <div class="rule w"><h3>WARNING</h3><p>Temperature or humidity outside the limits, or occupancy between 80% and 100% of capacity.</p></div>
+      <div class="rule c"><h3>CRITICAL</h3><p>Occupancy above capacity, any equipment in FAULT, or temperature and humidity both outside the limits. Raises an immediate alert.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Docker management (Q1)</h2>
+    <ol class="steps">
+      <li><div><h3>Run and check health</h3><p><code>docker compose up -d</code> starts everything. <code>docker compose ps</code> shows each container as healthy, and <code>docker logs library-edge-gateway</code> prints every CRITICAL alert.</p></div></li>
+      <li><div><h3>Failure and recovery</h3><p><code>docker compose stop nodered</code> takes the gateway down, and the dashboard becomes unavailable. <code>docker compose start nodered</code> brings it back healthy.</p></div></li>
+      <li><div><h3>Update v1 → v2</h3><p>Setting <code>GATEWAY_VERSION=v2</code> and running <code>docker compose up -d nodered</code> replaces the container with the v2 image. Its alerts also suggest an action, for example “Call technician for: computers”.</p></div></li>
+    </ol>
+  </section>
+</div>

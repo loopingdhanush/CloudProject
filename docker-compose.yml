@@ -1,0 +1,151 @@
+name: smart-library
+
+# Smart Library Monitoring - Edge (Docker) + MQTT/Node-RED gateway + Eclipse Ditto twin
+# Start everything:   docker compose up -d --build
+# Start order: Ditto (mongodb -> policies/things/search -> gateway -> nginx)
+#              -> twin-setup (creates the room twins) -> Mosquitto -> Node-RED -> simulator
+
+x-ditto-java: &ditto-java >-
+  -XX:ActiveProcessorCount=2 -XX:+ExitOnOutOfMemoryError -XX:+UseContainerSupport
+  -XX:+UseStringDeduplication -Xss512k -XX:MaxRAMPercentage=50 -XX:+UseG1GC
+  -Dpekko.coordinated-shutdown.exit-jvm=on
+  -Dpekko.cluster.shutdown-after-unsuccessful-join-seed-nodes=180s
+  -Dpekko.cluster.failure-detector.threshold=15.0
+  -Dpekko.cluster.failure-detector.expected-response-after=10s
+  -Dpekko.cluster.failure-detector.acceptable-heartbeat-pause=20s
+  -Dpekko.cluster.downing-provider-class=
+
+x-ditto-service: &ditto-service
+  restart: unless-stopped
+  mem_limit: 512m
+  networks:
+    default:
+      aliases: [ditto-cluster]
+  environment: &ditto-env
+    TZ: Asia/Kolkata
+    BIND_HOSTNAME: 0.0.0.0
+    MONGO_DB_HOSTNAME: mongodb
+    JAVA_TOOL_OPTIONS: *ditto-java
+  healthcheck:
+    test: curl --fail `hostname`:7626/alive || exit 1
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 60s
+  logging:
+    options: { max-size: 10m }
+
+services:
+  # ---------------- Eclipse Ditto (digital twin) ----------------
+  mongodb:
+    container_name: library-ditto-mongodb
+    image: mongo:7.0
+    restart: unless-stopped
+    mem_limit: 384m
+    command: mongod --storageEngine wiredTiger --noscripting
+    volumes: [mongo-data:/data/db]
+
+  policies:
+    container_name: library-ditto-policies
+    <<: *ditto-service
+    image: eclipse/ditto-policies:${DITTO_VERSION:-3.9.7}
+    depends_on: [mongodb]
+
+  things:
+    container_name: library-ditto-things
+    <<: *ditto-service
+    image: eclipse/ditto-things:${DITTO_VERSION:-3.9.7}
+    depends_on: [policies]
+
+  things-search:
+    container_name: library-ditto-search
+    <<: *ditto-service
+    image: eclipse/ditto-things-search:${DITTO_VERSION:-3.9.7}
+    depends_on: [policies]
+
+  gateway:
+    container_name: library-ditto-gateway
+    <<: *ditto-service
+    image: eclipse/ditto-gateway:${DITTO_VERSION:-3.9.7}
+    depends_on: [policies]
+    environment:
+      <<: *ditto-env
+      ENABLE_PRE_AUTHENTICATION: "true"
+
+  # nginx = basic authentication (user ditto / pass ditto) in front of Ditto
+  nginx:
+    container_name: library-ditto-nginx
+    build: ./ditto-nginx
+    image: ${DOCKERHUB_USER:-smartlibrary}/library-ditto-nginx:1.0
+    restart: unless-stopped
+    ports: ["8080:80"]
+    depends_on:
+      gateway: { condition: service_healthy }
+
+  # one-shot job: creates one Ditto Thing per room (and one for the gateway)
+  twin-setup:
+    container_name: library-twin-setup
+    build: ./sensors
+    image: ${DOCKERHUB_USER:-smartlibrary}/library-sensors:1.0
+    command: python create_twins.py
+    environment:
+      DITTO_URL: http://nginx
+    depends_on: [nginx]
+    restart: "no"
+
+  # ---------------- Edge: MQTT broker ----------------
+  mosquitto:
+    container_name: library-mqtt-broker
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    command: mosquitto -c /mosquitto-no-auth.conf
+    ports: ["1883:1883"]
+    depends_on:
+      twin-setup: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------- Edge: Node-RED gateway + dashboard ----------------
+  nodered:
+    build:
+      context: ./gateway
+      args:
+        GATEWAY_VERSION: ${GATEWAY_VERSION:-v1}
+    image: ${DOCKERHUB_USER:-smartlibrary}/library-gateway:${GATEWAY_VERSION:-v1}
+    container_name: library-edge-gateway
+    restart: unless-stopped
+    ports: ["1880:1880"]
+    environment:
+      TZ: Asia/Kolkata
+      MQTT_HOST: mosquitto
+      DITTO_URL: http://nginx
+    depends_on:
+      mosquitto: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "/healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------- Simulated library sensors ----------------
+  simulator:
+    container_name: library-sensors
+    build: ./sensors
+    image: ${DOCKERHUB_USER:-smartlibrary}/library-sensors:1.0
+    restart: unless-stopped
+    command: python simulator.py
+    environment:
+      MQTT_HOST: mosquitto
+      DITTO_URL: http://nginx
+      INTERVAL: "1"          # seconds between readings of each room
+      INVALID_RATE: "0.08"   # 8 % broken / impossible readings
+    depends_on:
+      mosquitto: { condition: service_healthy }
+      twin-setup: { condition: service_completed_successfully }
+
+volumes:
+  mongo-data:
